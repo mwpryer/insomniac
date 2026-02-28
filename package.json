@@ -1,0 +1,25 @@
+{
+  "name": "@mwp13/insomniac",
+  "version": "0.1.0",
+  "bin": {
+    "insomniac": "src/index.ts"
+  },
+  "type": "module",
+  "scripts": {
+    "lint": "oxlint",
+    "lint:fix": "oxlint --fix",
+    "format": "oxfmt --check",
+    "format:fix": "oxfmt"
+  },
+  "dependencies": {
+    "valibot": "^1.2.0"
+  },
+  "devDependencies": {
+    "@types/bun": "latest",
+    "oxfmt": "^0.35.0",
+    "oxlint": "^1.50.0"
+  },
+  "peerDependencies": {
+    "typescript": "^5"
+  }
+}
