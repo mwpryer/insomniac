@@ -2,7 +2,7 @@
 import path from "path";
 import { isEngineName, runEngine, type EngineName } from "@/engines";
 import * as v from "valibot";
-import { SpecSchema, readSpec } from "@/spec";
+import { PlanSchema, readPlan, allTasks } from "@/plan";
 
 const engineFlags = ["--claude", "--codex", "--opencode", "--gemini"] as const;
 
@@ -17,7 +17,7 @@ function requireArg(args: string[], i: number, flag: string): string {
 
 function printUsage(): void {
   console.log(`
-insomniac: run AI agents in a loop against a task spec
+insomniac: run AI agents in a loop against a task plan
 
 Usage:
   insomniac [options]
@@ -30,7 +30,7 @@ Engine (default: claude):
   --model <name>         Override the default model
 
 Options:
-  --spec <path>          Spec file path (required)
+  --plan <path>          Plan file path (required)
   --progress <path>      Progress file path (default: progress.txt)
   --max-iterations <n>   Cap iterations (default: 10)
   --prompt <path>        Prompt template path (default: bundled prompts/coding.md)
@@ -38,7 +38,7 @@ Options:
 }
 
 let engine: EngineName = "claude";
-let specPath: string | undefined;
+let planPath: string | undefined;
 let maxIterations = 10;
 let promptPath = path.resolve(import.meta.dir, "..", "prompts", "coding.md");
 let progressPath = "progress.txt";
@@ -54,8 +54,9 @@ for (let i = 0; i < args.length; i++) {
     continue;
   }
   switch (arg) {
+    case "--plan":
     case "--spec":
-      specPath = requireArg(args, ++i, "--spec");
+      planPath = requireArg(args, ++i, "--plan");
       break;
     case "--max-iterations":
       maxIterations = parseInt(requireArg(args, ++i, "--max-iterations"), 10);
@@ -81,38 +82,39 @@ for (let i = 0; i < args.length; i++) {
   }
 }
 
-if (!specPath) {
-  console.error("Error: --spec is required\n");
+if (!planPath) {
+  console.error("Error: --plan is required\n");
   printUsage();
   process.exit(1);
 }
 
 const promptTemplate = await Bun.file(promptPath).text();
 
-const initialSpec = v.parse(SpecSchema, await Bun.file(specPath).json());
+const initialPlan = v.parse(PlanSchema, await Bun.file(planPath).json());
 
 const loopStart = Date.now();
 
 const descPreview =
-  initialSpec.description.length > 60
-    ? initialSpec.description.slice(0, 57) + "..."
-    : initialSpec.description;
+  initialPlan.description.length > 60
+    ? initialPlan.description.slice(0, 57) + "..."
+    : initialPlan.description;
 console.log(
-  `insomniac  ${engine}${model ? ` (${model})` : ""}  ${initialSpec.branchName}: ${descPreview}`,
+  `insomniac  ${engine}${model ? ` (${model})` : ""}  ${initialPlan.branchName}: ${descPreview}`,
 );
 
 let stuckCount = 0;
 
 for (let iteration = 1; iteration <= maxIterations; iteration++) {
-  const spec = await readSpec(specPath);
-  const remaining = spec.tasks.filter((t) => !t.passes);
+  const plan = await readPlan(planPath);
+  const tasks = allTasks(plan);
+  const remaining = tasks.filter((t) => !t.passes);
 
   if (remaining.length === 0) {
     console.log("All tasks complete!");
     break;
   }
 
-  const before = spec.tasks.filter((t) => t.passes).length;
+  const before = tasks.filter((t) => t.passes).length;
 
   console.log(
     `\niteration ${iteration}/${maxIterations}  ${remaining.length} task(s) remaining`,
@@ -121,7 +123,7 @@ for (let iteration = 1; iteration <= maxIterations; iteration++) {
   const iterStart = Date.now();
 
   const prompt = promptTemplate
-    .replaceAll("{{spec}}", path.resolve(specPath))
+    .replaceAll("{{plan}}", path.resolve(planPath))
     .replaceAll("{{progress}}", path.resolve(progressPath));
   const exitCode = await runEngine(engine, prompt, model);
 
@@ -140,10 +142,11 @@ for (let iteration = 1; iteration <= maxIterations; iteration++) {
   }
 
   // Check completion and stuck detection
-  const after = await readSpec(specPath);
-  const done = after.tasks.filter((t) => t.passes).length;
+  const after = await readPlan(planPath);
+  const afterTasks = allTasks(after);
+  const done = afterTasks.filter((t) => t.passes).length;
   console.log(
-    `Progress: ${done}/${after.tasks.length} tasks passing (${Math.floor(iterElapsed / 60)}m ${iterElapsed % 60}s)`,
+    `Progress: ${done}/${afterTasks.length} tasks passing (${Math.floor(iterElapsed / 60)}m ${iterElapsed % 60}s)`,
   );
 
   if (done === before) {
@@ -158,12 +161,13 @@ for (let iteration = 1; iteration <= maxIterations; iteration++) {
 }
 
 const elapsed = Math.round((Date.now() - loopStart) / 1000);
-const finalSpec = await readSpec(specPath);
-const passed = finalSpec.tasks.filter((t) => t.passes).length;
-const failed = finalSpec.tasks.filter((t) => !t.passes);
+const finalPlan = await readPlan(planPath);
+const finalTasks = allTasks(finalPlan);
+const passed = finalTasks.filter((t) => t.passes).length;
+const failed = finalTasks.filter((t) => !t.passes);
 
 console.log(`\n--- Summary ---`);
-console.log(`Passed: ${passed}/${finalSpec.tasks.length}`);
+console.log(`Passed: ${passed}/${finalTasks.length}`);
 if (failed.length > 0) {
   console.log(`Failed: ${failed.map((t) => t.id).join(", ")}`);
 }
