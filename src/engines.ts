@@ -45,13 +45,15 @@ export async function runEngine(
   engine: EngineName,
   prompt: string,
   model?: string,
+  quiet?: boolean,
 ): Promise<number> {
   const { cmd, env } = buildSpawn(engine, prompt, model);
+  const io = quiet ? "ignore" : "inherit";
   const proc = Bun.spawn(cmd, {
     cwd: process.cwd(),
     stdin: "inherit",
-    stdout: "inherit",
-    stderr: "inherit",
+    stdout: io,
+    stderr: io,
     env: { ...process.env, ...env },
   });
   return proc.exited;

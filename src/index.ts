@@ -34,6 +34,9 @@ Options:
   --progress <path>      Progress file path (default: progress.txt)
   --max-iterations <n>   Cap iterations (default: 10)
   --prompt <path>        Prompt template path (default: bundled prompts/coding.md)
+  -q, --quiet            Suppress engine output
+  -v, --verbose, --debug Show orchestrator diagnostics
+  --print-prompt         Print the bundled prompt template to stdout and exit
 `);
 }
 
@@ -43,6 +46,8 @@ let maxIterations = 10;
 let promptPath = path.resolve(import.meta.dir, "..", "prompts", "coding.md");
 let progressPath = "progress.txt";
 let model: string | undefined;
+let quiet = false;
+let verbose = false;
 
 const args = process.argv.slice(2);
 for (let i = 0; i < args.length; i++) {
@@ -55,7 +60,6 @@ for (let i = 0; i < args.length; i++) {
   }
   switch (arg) {
     case "--plan":
-    case "--spec":
       planPath = requireArg(args, ++i, "--plan");
       break;
     case "--max-iterations":
@@ -70,6 +74,21 @@ for (let i = 0; i < args.length; i++) {
     case "--model":
       model = requireArg(args, ++i, "--model");
       break;
+    case "--quiet":
+    case "-q":
+      quiet = true;
+      break;
+    case "--verbose":
+    case "--debug":
+    case "-v":
+      verbose = true;
+      break;
+    case "--print-prompt": {
+      const bundled = await Bun.file(promptPath).text();
+      process.stdout.write(bundled);
+      process.exit(0);
+      break;
+    }
     case "--help":
     case "-h":
       printUsage();
@@ -88,9 +107,30 @@ if (!planPath) {
   process.exit(1);
 }
 
-const promptTemplate = await Bun.file(promptPath).text();
+const planFile = Bun.file(planPath);
+if (!(await planFile.exists())) {
+  console.error(`Plan file not found: ${planPath}`);
+  process.exit(1);
+}
+const promptFile = Bun.file(promptPath);
+if (!(await promptFile.exists())) {
+  console.error(`Prompt file not found: ${promptPath}`);
+  process.exit(1);
+}
 
-const initialPlan = v.parse(PlanSchema, await Bun.file(planPath).json());
+const promptTemplate = await promptFile.text();
+
+const initialPlan = v.parse(PlanSchema, await planFile.json());
+
+if (verbose) {
+  console.log(`[debug] engine: ${engine}`);
+  console.log(`[debug] model: ${model ?? "(default)"}`);
+  console.log(`[debug] planPath: ${planPath}`);
+  console.log(`[debug] promptPath: ${promptPath}`);
+  console.log(`[debug] progressPath: ${progressPath}`);
+  console.log(`[debug] maxIterations: ${maxIterations}`);
+  console.log(`[debug] quiet: ${quiet}`);
+}
 
 const loopStart = Date.now();
 
@@ -125,7 +165,14 @@ for (let iteration = 1; iteration <= maxIterations; iteration++) {
   const prompt = promptTemplate
     .replaceAll("{{plan}}", path.resolve(planPath))
     .replaceAll("{{progress}}", path.resolve(progressPath));
-  const exitCode = await runEngine(engine, prompt, model);
+
+  if (verbose) {
+    const preview = prompt.length > 200 ? prompt.slice(0, 200) + "..." : prompt;
+    console.log(`[debug] prompt: ${preview}`);
+    console.log(`[debug] spawning: ${engine}${model ? ` --model ${model}` : ""}`);
+  }
+
+  const exitCode = await runEngine(engine, prompt, model, quiet);
 
   const iterElapsed = Math.round((Date.now() - iterStart) / 1000);
 

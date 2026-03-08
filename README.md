@@ -36,6 +36,9 @@ insomniac --gemini --plan plan.json --max-iterations 5
 | `--progress <path>`    | `progress.txt`              | Progress file path        |
 | `--prompt <path>`      | bundled `prompts/coding.md` | Prompt template path      |
 | `--model <name>`       | engine default              | Override the engine model |
+| `-q`, `--quiet`        |                             | Suppress engine output |
+| `-v`, `--verbose`      |                             | Show orchestrator diagnostics |
+| `--print-prompt`       |                             | Print the bundled prompt template to stdout and exit |
 
 ## Plan format
 
