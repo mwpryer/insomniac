@@ -15,6 +15,25 @@ function requireArg(args: string[], i: number, flag: string): string {
   return value;
 }
 
+function ensureCleanWorkingTree(): void {
+  const status = Bun.spawnSync(["git", "status", "--porcelain"], { stdout: "pipe" });
+  if (status.stdout.toString().trim()) {
+    console.error("Working tree is not clean. Commit or stash changes before running insomniac.");
+    process.exit(1);
+  }
+}
+
+function checkoutOrCreateBranch(branch: string): void {
+  const checkout = Bun.spawnSync(["git", "checkout", branch], { stderr: "pipe" });
+  if (checkout.exitCode !== 0) {
+    const create = Bun.spawnSync(["git", "checkout", "-b", branch], { stderr: "pipe" });
+    if (create.exitCode !== 0) {
+      console.error(`Failed to checkout branch: ${branch}`);
+      process.exit(1);
+    }
+  }
+}
+
 function printUsage(): void {
   console.log(`
 insomniac: run AI agents in a loop against a task plan
@@ -122,7 +141,12 @@ const promptTemplate = await promptFile.text();
 
 const initialPlan = v.parse(PlanSchema, await planFile.json());
 
+const branch = initialPlan.branchName;
+ensureCleanWorkingTree();
+checkoutOrCreateBranch(branch);
+
 if (verbose) {
+  console.log(`[debug] branch: ${branch}`);
   console.log(`[debug] engine: ${engine}`);
   console.log(`[debug] model: ${model ?? "(default)"}`);
   console.log(`[debug] planPath: ${planPath}`);
