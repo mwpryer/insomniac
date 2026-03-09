@@ -21,7 +21,7 @@ export const PlanSchema = v.object({
   description: v.string(),
   sourcePrd: v.optional(v.string()),
   architecturalDecisions: v.optional(
-    v.array(v.object({ area: v.string(), decision: v.string() }))
+    v.array(v.object({ area: v.string(), decision: v.string() })),
   ),
   phases: v.array(PhaseSchema),
 });

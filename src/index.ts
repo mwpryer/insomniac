@@ -4,26 +4,12 @@ import { parseArgs } from "node:util";
 import { runEngine, type EngineName } from "@/engines";
 import * as v from "valibot";
 import { PlanSchema, readPlan, allTasks } from "@/plan";
+import {
+  formatTime,
+  ensureCleanWorkingTree,
+  checkoutOrCreateBranch,
+} from "@/utils";
 import pkg from "../package.json";
-
-function ensureCleanWorkingTree(): void {
-  const status = Bun.spawnSync(["git", "status", "--porcelain"], { stdout: "pipe" });
-  if (status.stdout.toString().trim()) {
-    console.error("Working tree is not clean. Commit or stash changes before running insomniac.");
-    process.exit(1);
-  }
-}
-
-function checkoutOrCreateBranch(branch: string): void {
-  const checkout = Bun.spawnSync(["git", "checkout", branch], { stderr: "pipe" });
-  if (checkout.exitCode !== 0) {
-    const create = Bun.spawnSync(["git", "checkout", "-b", branch], { stderr: "pipe" });
-    if (create.exitCode !== 0) {
-      console.error(`Failed to checkout branch: ${branch}`);
-      process.exit(1);
-    }
-  }
-}
 
 function printUsage(): void {
   console.log(`
@@ -32,22 +18,23 @@ insomniac: run AI agents in a loop against a task plan
 Usage:
   insomniac [options]
 
-Engine (default: claude):
-  --claude               Use Claude Code
-  --codex                Use Codex
-  --opencode             Use OpenCode
-  --gemini               Use Gemini CLI
-  -m, --model <name>     Override the default model
-
 Options:
-  -p, --plan <path>      Plan file path (required)
-  --progress <path>      Progress file path (default: progress.txt)
+  -p, --plan <path>         Plan file path (required)
+  --progress <path>         Progress file path (default: progress.txt)
   -n, --max-iterations <n>  Cap iterations (default: 10)
-  --prompt <path>        Prompt template path (default: bundled prompts/coding.md)
-  -q, --quiet            Suppress engine output
-  -v, --verbose, --debug Show orchestrator diagnostics
-  --print-prompt         Print the bundled prompt template to stdout and exit
-  -V, --version          Print version and exit
+  --prompt <path>           Prompt template path (default: bundled prompts/coding.md)
+  -q, --quiet               Suppress engine output
+  -d, --debug               Show harness diagnostics
+  --print-prompt            Print the bundled prompt template to stdout and exit
+  -h, --help                Show this help
+  -V, --version             Print version and exit
+
+Engine (default: claude):
+  --claude                  Use Claude Code
+  --codex                   Use Codex
+  --opencode                Use OpenCode
+  --gemini                  Use Gemini CLI
+  -m, --model <name>        Override the default model
 `);
 }
 
@@ -56,21 +43,20 @@ try {
   ({ values } = parseArgs({
     args: process.argv.slice(2),
     options: {
-      plan:             { type: "string", short: "p" },
-      progress:         { type: "string", default: "progress.txt" },
+      plan: { type: "string", short: "p" },
+      progress: { type: "string", default: "progress.txt" },
       "max-iterations": { type: "string", short: "n", default: "10" },
-      prompt:           { type: "string" },
-      model:            { type: "string", short: "m" },
-      quiet:            { type: "boolean", short: "q", default: false },
-      verbose:          { type: "boolean", short: "v", default: false },
-      debug:            { type: "boolean", default: false },
-      "print-prompt":   { type: "boolean", default: false },
-      help:             { type: "boolean", short: "h", default: false },
-      version:          { type: "boolean", short: "V", default: false },
-      claude:           { type: "boolean", default: false },
-      codex:            { type: "boolean", default: false },
-      opencode:         { type: "boolean", default: false },
-      gemini:           { type: "boolean", default: false },
+      prompt: { type: "string" },
+      model: { type: "string", short: "m" },
+      quiet: { type: "boolean", short: "q", default: false },
+      debug: { type: "boolean", short: "d", default: false },
+      "print-prompt": { type: "boolean", default: false },
+      help: { type: "boolean", short: "h", default: false },
+      version: { type: "boolean", short: "V", default: false },
+      claude: { type: "boolean", default: false },
+      codex: { type: "boolean", default: false },
+      opencode: { type: "boolean", default: false },
+      gemini: { type: "boolean", default: false },
     },
     strict: true,
   }));
@@ -90,7 +76,8 @@ if (values.version) {
   process.exit(0);
 }
 
-const promptPath = values.prompt ?? path.resolve(import.meta.dir, "..", "prompts", "coding.md");
+const promptPath =
+  values.prompt ?? path.resolve(import.meta.dir, "..", "prompts", "coding.md");
 
 if (values["print-prompt"]) {
   const bundled = await Bun.file(promptPath).text();
@@ -101,11 +88,11 @@ if (values["print-prompt"]) {
 const engineNames = ["claude", "codex", "opencode", "gemini"] as const;
 const engine: EngineName = engineNames.find((name) => values[name]) ?? "claude";
 const planPath = values.plan;
-const maxIterations = parseInt(values["max-iterations"]!, 10);
+const maxIterations = Math.max(1, parseInt(values["max-iterations"]!, 10));
 const progressPath = values.progress!;
 const model = values.model;
-const quiet = values.quiet!;
-const verbose = values.verbose! || values.debug!;
+const quiet = values.quiet;
+const debug = values.debug;
 
 if (!planPath) {
   console.error("Error: --plan is required\n");
@@ -132,26 +119,20 @@ const branch = initialPlan.branchName;
 ensureCleanWorkingTree();
 checkoutOrCreateBranch(branch);
 
-if (verbose) {
-  console.log(`[debug] branch: ${branch}`);
-  console.log(`[debug] engine: ${engine}`);
-  console.log(`[debug] model: ${model ?? "(default)"}`);
-  console.log(`[debug] planPath: ${planPath}`);
-  console.log(`[debug] promptPath: ${promptPath}`);
-  console.log(`[debug] progressPath: ${progressPath}`);
-  console.log(`[debug] maxIterations: ${maxIterations}`);
-  console.log(`[debug] quiet: ${quiet}`);
-}
+const totalTasks = allTasks(initialPlan).length;
+
+console.log(`insomniac (${engine})`);
+console.log(`\n${initialPlan.description}\n`);
+console.log(`  branch:      ${branch}`);
+console.log(`  tasks:       ${totalTasks}`);
+console.log(`  iterations:  ${maxIterations}`);
+console.log(`  model:       ${model ?? "(default)"}`);
+console.log(`  quiet:       ${quiet}`);
+console.log(`  plan:        ${planPath}`);
+console.log(`  prompt:      ${promptPath}`);
+console.log(`  progress:    ${progressPath}`);
 
 const loopStart = Date.now();
-
-const descPreview =
-  initialPlan.description.length > 60
-    ? initialPlan.description.slice(0, 57) + "..."
-    : initialPlan.description;
-console.log(
-  `insomniac  ${engine}${model ? ` (${model})` : ""}  ${initialPlan.branchName}: ${descPreview}`,
-);
 
 let stuckCount = 0;
 
@@ -168,7 +149,7 @@ for (let iteration = 1; iteration <= maxIterations; iteration++) {
   const before = tasks.filter((t) => t.passes).length;
 
   console.log(
-    `\niteration ${iteration}/${maxIterations}  ${remaining.length} task(s) remaining`,
+    `\n[${iteration}/${maxIterations}] ${remaining.length} tasks remaining`,
   );
 
   const iterStart = Date.now();
@@ -177,10 +158,12 @@ for (let iteration = 1; iteration <= maxIterations; iteration++) {
     .replaceAll("{{plan}}", path.resolve(planPath))
     .replaceAll("{{progress}}", path.resolve(progressPath));
 
-  if (verbose) {
+  if (debug) {
     const preview = prompt.length > 200 ? prompt.slice(0, 200) + "..." : prompt;
     console.log(`[debug] prompt: ${preview}`);
-    console.log(`[debug] spawning: ${engine}${model ? ` --model ${model}` : ""}`);
+    console.log(
+      `[debug] spawning: ${engine}${model ? ` --model ${model}` : ""}`,
+    );
   }
 
   const exitCode = await runEngine(engine, prompt, model, quiet);
@@ -188,9 +171,7 @@ for (let iteration = 1; iteration <= maxIterations; iteration++) {
   const iterElapsed = Math.round((Date.now() - iterStart) / 1000);
 
   if (exitCode !== 0) {
-    console.error(
-      `Engine exited ${exitCode} (${Math.floor(iterElapsed / 60)}m ${iterElapsed % 60}s)`,
-    );
+    console.error(`Engine exited ${exitCode} (${formatTime(iterElapsed)})`);
     stuckCount++;
     if (stuckCount >= 3) {
       console.log(`No progress for ${stuckCount} iterations, stopping.`);
@@ -204,7 +185,7 @@ for (let iteration = 1; iteration <= maxIterations; iteration++) {
   const afterTasks = allTasks(after);
   const done = afterTasks.filter((t) => t.passes).length;
   console.log(
-    `Progress: ${done}/${afterTasks.length} tasks passing (${Math.floor(iterElapsed / 60)}m ${iterElapsed % 60}s)`,
+    `${done}/${afterTasks.length} tasks passing (${formatTime(iterElapsed)})`,
   );
 
   if (done === before) {
@@ -224,9 +205,9 @@ const finalTasks = allTasks(finalPlan);
 const passed = finalTasks.filter((t) => t.passes).length;
 const failed = finalTasks.filter((t) => !t.passes);
 
-console.log(`\n--- Summary ---`);
-console.log(`Passed: ${passed}/${finalTasks.length}`);
+console.log(
+  `\n${passed}/${finalTasks.length} tasks passed in ${formatTime(elapsed)}`,
+);
 if (failed.length > 0) {
   console.log(`Failed: ${failed.map((t) => t.id).join(", ")}`);
 }
-console.log(`Elapsed: ${Math.floor(elapsed / 60)}m ${elapsed % 60}s`);
