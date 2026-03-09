@@ -1,19 +1,10 @@
 #!/usr/bin/env bun
 import path from "path";
-import { isEngineName, runEngine, type EngineName } from "@/engines";
+import { parseArgs } from "node:util";
+import { runEngine, type EngineName } from "@/engines";
 import * as v from "valibot";
 import { PlanSchema, readPlan, allTasks } from "@/plan";
-
-const engineFlags = ["--claude", "--codex", "--opencode", "--gemini"] as const;
-
-function requireArg(args: string[], i: number, flag: string): string {
-  const value = args[i];
-  if (value === undefined) {
-    console.error(`Missing value for ${flag}`);
-    process.exit(1);
-  }
-  return value;
-}
+import pkg from "../package.json";
 
 function ensureCleanWorkingTree(): void {
   const status = Bun.spawnSync(["git", "status", "--porcelain"], { stdout: "pipe" });
@@ -46,79 +37,75 @@ Engine (default: claude):
   --codex                Use Codex
   --opencode             Use OpenCode
   --gemini               Use Gemini CLI
-  --model <name>         Override the default model
+  -m, --model <name>     Override the default model
 
 Options:
-  --plan <path>          Plan file path (required)
+  -p, --plan <path>      Plan file path (required)
   --progress <path>      Progress file path (default: progress.txt)
-  --max-iterations <n>   Cap iterations (default: 10)
+  -n, --max-iterations <n>  Cap iterations (default: 10)
   --prompt <path>        Prompt template path (default: bundled prompts/coding.md)
   -q, --quiet            Suppress engine output
   -v, --verbose, --debug Show orchestrator diagnostics
   --print-prompt         Print the bundled prompt template to stdout and exit
+  -V, --version          Print version and exit
 `);
 }
 
-let engine: EngineName = "claude";
-let planPath: string | undefined;
-let maxIterations = 10;
-let promptPath = path.resolve(import.meta.dir, "..", "prompts", "coding.md");
-let progressPath = "progress.txt";
-let model: string | undefined;
-let quiet = false;
-let verbose = false;
-
-const args = process.argv.slice(2);
-for (let i = 0; i < args.length; i++) {
-  const arg = args[i]!;
-  const engineFlag = engineFlags.find((f) => f === arg);
-  if (engineFlag) {
-    const name = engineFlag.slice(2);
-    if (isEngineName(name)) engine = name;
-    continue;
-  }
-  switch (arg) {
-    case "--plan":
-      planPath = requireArg(args, ++i, "--plan");
-      break;
-    case "--max-iterations":
-      maxIterations = parseInt(requireArg(args, ++i, "--max-iterations"), 10);
-      break;
-    case "--progress":
-      progressPath = requireArg(args, ++i, "--progress");
-      break;
-    case "--prompt":
-      promptPath = requireArg(args, ++i, "--prompt");
-      break;
-    case "--model":
-      model = requireArg(args, ++i, "--model");
-      break;
-    case "--quiet":
-    case "-q":
-      quiet = true;
-      break;
-    case "--verbose":
-    case "--debug":
-    case "-v":
-      verbose = true;
-      break;
-    case "--print-prompt": {
-      const bundled = await Bun.file(promptPath).text();
-      process.stdout.write(bundled);
-      process.exit(0);
-      break;
-    }
-    case "--help":
-    case "-h":
-      printUsage();
-      process.exit(0);
-      break;
-    default:
-      console.error(`Unknown option: ${arg}`);
-      printUsage();
-      process.exit(1);
-  }
+let values;
+try {
+  ({ values } = parseArgs({
+    args: process.argv.slice(2),
+    options: {
+      plan:             { type: "string", short: "p" },
+      progress:         { type: "string", default: "progress.txt" },
+      "max-iterations": { type: "string", short: "n", default: "10" },
+      prompt:           { type: "string" },
+      model:            { type: "string", short: "m" },
+      quiet:            { type: "boolean", short: "q", default: false },
+      verbose:          { type: "boolean", short: "v", default: false },
+      debug:            { type: "boolean", default: false },
+      "print-prompt":   { type: "boolean", default: false },
+      help:             { type: "boolean", short: "h", default: false },
+      version:          { type: "boolean", short: "V", default: false },
+      claude:           { type: "boolean", default: false },
+      codex:            { type: "boolean", default: false },
+      opencode:         { type: "boolean", default: false },
+      gemini:           { type: "boolean", default: false },
+    },
+    strict: true,
+  }));
+} catch (e) {
+  console.error(e instanceof Error ? e.message : String(e));
+  printUsage();
+  process.exit(1);
 }
+
+if (values.help) {
+  printUsage();
+  process.exit(0);
+}
+
+if (values.version) {
+  console.log(pkg.version);
+  process.exit(0);
+}
+
+const promptPath = values.prompt ?? path.resolve(import.meta.dir, "..", "prompts", "coding.md");
+
+if (values["print-prompt"]) {
+  const bundled = await Bun.file(promptPath).text();
+  process.stdout.write(bundled);
+  process.exit(0);
+}
+
+const engineNames = ["claude", "codex", "opencode", "gemini"] as const;
+const engine: EngineName = engineNames.find((name) => values[name]) ?? "claude";
+const planPath = values.plan;
+const maxIterations = parseInt(values["max-iterations"]!, 10);
+const progressPath = values.progress!;
+const model = values.model;
+const quiet = values.quiet!;
+const verbose = values.verbose! || values.debug!;
 
 if (!planPath) {
   console.error("Error: --plan is required\n");
