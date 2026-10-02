@@ -1,60 +1,55 @@
-const engines = ["claude", "codex", "opencode", "gemini"] as const;
-export type EngineName = (typeof engines)[number];
+export const engineNames = ["claude", "codex", "opencode", "agy"] as const;
+type EngineName = (typeof engineNames)[number];
 
-export function isEngineName(name: string): name is EngineName {
-  return (engines as readonly string[]).includes(name);
+export type Engine = { spec: string; name: EngineName; model: string | null };
+
+export function parseEngine(spec: string): Engine {
+  const [head, model] = spec.split(":", 2);
+  const name = engineNames.find((n) => n === head);
+  if (!name) {
+    throw new Error(
+      `Unknown engine "${head}". Expected one of: ${engineNames.join(", ")}`,
+    );
+  }
+  return { spec, name, model: model ?? null };
 }
 
-type SpawnConfig = {
-  cmd: string[];
-  env?: Record<string, string>;
-};
-
-function buildSpawn(
-  engine: EngineName,
-  prompt: string,
-  model?: string,
-): SpawnConfig {
-  switch (engine) {
-    case "claude": {
-      const cmd = ["claude", "-p", prompt, "--dangerously-skip-permissions"];
-      if (model) cmd.push("--model", model);
-      return { cmd };
-    }
-    case "codex": {
-      const cmd = ["codex", "exec", "--full-auto"];
-      if (model) cmd.push("--model", model);
-      cmd.push(prompt);
-      return { cmd };
-    }
-    case "opencode": {
-      const cmd = ["opencode", "run"];
-      if (model) cmd.push("--model", model);
-      cmd.push(prompt);
-      return { cmd, env: { OPENCODE_PERMISSION: '{"*":"allow"}' } };
-    }
-    case "gemini": {
-      const cmd = ["gemini", "--yolo", "-p", prompt];
-      if (model) cmd.push("--model", model);
-      return { cmd };
-    }
+function command(engine: Engine, prompt: string): string[] {
+  const model = engine.model ? ["--model", engine.model] : [];
+  switch (engine.name) {
+    case "claude":
+      return [
+        "claude",
+        "-p",
+        "--dangerously-skip-permissions",
+        ...model,
+        prompt,
+      ];
+    case "codex":
+      return [
+        "codex",
+        "exec",
+        "--dangerously-bypass-approvals-and-sandbox",
+        ...model,
+        prompt,
+      ];
+    case "opencode":
+      return ["opencode", "run", "--auto", ...model, prompt];
+    case "agy":
+      return ["agy", "--dangerously-skip-permissions", ...model, "-p", prompt];
   }
 }
 
-export async function runEngine(
-  engine: EngineName,
+export async function runSession(
+  engine: Engine,
   prompt: string,
-  model?: string,
-  quiet?: boolean,
+  quiet: boolean,
 ): Promise<number> {
-  const { cmd, env } = buildSpawn(engine, prompt, model);
   const io = quiet ? "ignore" : "inherit";
-  const proc = Bun.spawn(cmd, {
-    cwd: process.cwd(),
-    stdin: "inherit",
+  const proc = Bun.spawn(command(engine, prompt), {
+    stdin: "ignore",
     stdout: io,
     stderr: io,
-    env: { ...process.env, ...env },
   });
   return proc.exited;
 }

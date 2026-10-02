@@ -1,213 +1,184 @@
 #!/usr/bin/env bun
-import path from "path";
+import path from "node:path";
+import { appendFile, rm } from "node:fs/promises";
 import { parseArgs } from "node:util";
-import { runEngine, type EngineName } from "@/engines";
-import * as v from "valibot";
-import { PlanSchema, readPlan, allTasks } from "@/plan";
-import {
-  formatTime,
-  ensureCleanWorkingTree,
-  checkoutOrCreateBranch,
-} from "@/utils";
+import { $ } from "bun";
+import { engineNames, parseEngine, runSession, type Engine } from "@/engines";
+import { parseBrief } from "@/brief";
+import orchestratorPrompt from "../prompts/orchestrator.md" with { type: "text" };
+import workerPrompt from "../prompts/worker.md" with { type: "text" };
 import pkg from "../package.json";
 
-function printUsage(): void {
-  console.log(`
-insomniac: run AI agents in a loop against a task plan
+const usage = `insomniac: a runner that takes coding agents through a plan, one task per session
 
 Usage:
-  insomniac [options]
+  insomniac <plan> [options]
 
 Options:
-  -p, --plan <path>         Plan file path (required)
-  --progress <path>         Progress file path (default: progress.txt)
-  -n, --max-iterations <n>  Cap iterations (default: 10)
-  --prompt <path>           Prompt template path (default: bundled prompts/coding.md)
-  -q, --quiet               Suppress engine output
-  -d, --debug               Show harness diagnostics
-  --print-prompt            Print the bundled prompt template to stdout and exit
-  -h, --help                Show this help
-  -V, --version             Print version and exit
+  -o, --orchestrator <engine[:model]>  Engine that picks tasks (default: claude)
+  -w, --worker <engine[:model]>        Engine that does tasks (default: claude)
+  -n, --sessions <n>                   Cap on worker sessions (default: 10)
+  -q, --quiet                          Hide engine output
+  -h, --help                           Show this help
+  -V, --version                        Print version
 
-Engine (default: claude):
-  --claude                  Use Claude Code
-  --codex                   Use Codex
-  --opencode                Use OpenCode
-  --gemini                  Use Gemini CLI
-  -m, --model <name>        Override the default model
-`);
-}
+Engines: ${engineNames.join(", ")}
+`;
 
-let values;
-try {
-  ({ values } = parseArgs({
-    args: process.argv.slice(2),
-    options: {
-      plan: { type: "string", short: "p" },
-      progress: { type: "string", default: "progress.txt" },
-      "max-iterations": { type: "string", short: "n", default: "10" },
-      prompt: { type: "string" },
-      model: { type: "string", short: "m" },
-      quiet: { type: "boolean", short: "q", default: false },
-      debug: { type: "boolean", short: "d", default: false },
-      "print-prompt": { type: "boolean", default: false },
-      help: { type: "boolean", short: "h", default: false },
-      version: { type: "boolean", short: "V", default: false },
-      claude: { type: "boolean", default: false },
-      codex: { type: "boolean", default: false },
-      opencode: { type: "boolean", default: false },
-      gemini: { type: "boolean", default: false },
-    },
-    strict: true,
-  }));
-} catch (e) {
-  console.error(e instanceof Error ? e.message : String(e));
-  printUsage();
+function fail(error: unknown, help?: string): never {
+  console.error(`Error: ${error instanceof Error ? error.message : error}`);
+  if (help) console.error(`\n${help}`);
   process.exit(1);
 }
 
-if (values.help) {
-  printUsage();
-  process.exit(0);
+function elapsed(since: number): string {
+  const total = Math.round((Date.now() - since) / 1000);
+  const m = Math.floor(total / 60);
+  const s = total % 60;
+  return m > 0 ? `${m}m ${s}s` : `${s}s`;
 }
 
-if (values.version) {
+async function isDirty(): Promise<boolean> {
+  return (await $`git status --porcelain`.text()) !== "";
+}
+
+function parseCliArgs() {
+  try {
+    return parseArgs({
+      args: process.argv.slice(2),
+      allowPositionals: true,
+      options: {
+        orchestrator: { type: "string", short: "o", default: "claude" },
+        worker: { type: "string", short: "w", default: "claude" },
+        sessions: { type: "string", short: "n", default: "10" },
+        quiet: { type: "boolean", short: "q", default: false },
+        help: { type: "boolean", short: "h" },
+        version: { type: "boolean", short: "V" },
+      },
+    });
+  } catch (e) {
+    fail(e, usage);
+  }
+}
+
+const args = parseCliArgs();
+
+if (args.values.help) {
+  console.log(usage);
+  process.exit(0);
+}
+if (args.values.version) {
   console.log(pkg.version);
   process.exit(0);
 }
 
-const promptPath =
-  values.prompt ?? path.resolve(import.meta.dir, "..", "prompts", "coding.md");
-
-if (values["print-prompt"]) {
-  const bundled = await Bun.file(promptPath).text();
-  process.stdout.write(bundled);
-  process.exit(0);
+let orchestrator: Engine;
+let worker: Engine;
+try {
+  orchestrator = parseEngine(args.values.orchestrator);
+  worker = parseEngine(args.values.worker);
+} catch (e) {
+  fail(e, usage);
 }
 
-const engineNames = ["claude", "codex", "opencode", "gemini"] as const;
-const engine: EngineName = engineNames.find((name) => values[name]) ?? "claude";
-const planPath = values.plan;
-const maxIterations = Math.max(1, parseInt(values["max-iterations"]!, 10));
-const progressPath = values.progress!;
-const model = values.model;
-const quiet = values.quiet;
-const debug = values.debug;
+const planArg = args.positionals[0];
+if (!planArg) fail("Plan path is required", usage);
+const plan = path.resolve(planArg);
+if (!(await Bun.file(plan).exists())) fail(`Plan not found: ${plan}`);
+const maxSessions = parseInt(args.values.sessions, 10);
+if (!(maxSessions > 0)) fail("--sessions must be a positive number");
+const quiet = args.values.quiet;
 
-if (!planPath) {
-  console.error("Error: --plan is required\n");
-  printUsage();
-  process.exit(1);
-}
-
-const planFile = Bun.file(planPath);
-if (!(await planFile.exists())) {
-  console.error(`Plan file not found: ${planPath}`);
-  process.exit(1);
-}
-const promptFile = Bun.file(promptPath);
-if (!(await promptFile.exists())) {
-  console.error(`Prompt file not found: ${promptPath}`);
-  process.exit(1);
-}
-
-const promptTemplate = await promptFile.text();
-
-const initialPlan = v.parse(PlanSchema, await planFile.json());
-
-const branch = initialPlan.branchName;
-ensureCleanWorkingTree();
-checkoutOrCreateBranch(branch);
-
-const totalTasks = allTasks(initialPlan).length;
-
-console.log(`insomniac (${engine})`);
-console.log(`\n${initialPlan.description}\n`);
-console.log(`  branch:      ${branch}`);
-console.log(`  tasks:       ${totalTasks}`);
-console.log(`  iterations:  ${maxIterations}`);
-console.log(`  model:       ${model ?? "(default)"}`);
-console.log(`  quiet:       ${quiet}`);
-console.log(`  plan:        ${planPath}`);
-console.log(`  prompt:      ${promptPath}`);
-console.log(`  progress:    ${progressPath}`);
-
-const loopStart = Date.now();
-
-let stuckCount = 0;
-
-for (let iteration = 1; iteration <= maxIterations; iteration++) {
-  const plan = await readPlan(planPath);
-  const tasks = allTasks(plan);
-  const remaining = tasks.filter((t) => !t.passes);
-
-  if (remaining.length === 0) {
-    console.log("All tasks complete!");
-    break;
+for (const engine of [orchestrator, worker]) {
+  if (!Bun.which(engine.name)) {
+    fail(`Engine "${engine.name}" is not on PATH. Install its CLI first.`);
   }
+}
 
-  const before = tasks.filter((t) => t.passes).length;
+const repo = await $`git rev-parse --show-toplevel`.quiet().nothrow();
+if (repo.exitCode !== 0) {
+  fail("Not a git repo. insomniac commits each task, so run it inside one.");
+}
+if (await isDirty()) fail("Working tree is dirty. Commit or stash first.");
 
-  console.log(
-    `\n[${iteration}/${maxIterations}] ${remaining.length} tasks remaining`,
+const stateDir = path.join(repo.text().trim(), ".insomniac");
+const progress = path.join(stateDir, "progress.md");
+const briefPath = path.join(stateDir, "brief.md");
+const reportPath = path.join(stateDir, "report.md");
+await Bun.write(path.join(stateDir, ".gitignore"), "*\n");
+
+console.log(`insomniac ${pkg.version}`);
+console.log(`  plan:          ${plan}`);
+console.log(`  progress:      ${progress}`);
+console.log(`  orchestrator:  ${orchestrator.spec}`);
+console.log(`  worker:        ${worker.spec}`);
+console.log(`  sessions:      ${maxSessions}`);
+
+const start = Date.now();
+let session = 0;
+
+function finish(outcome: string, ok = false): never {
+  console.log(`\n${outcome}`);
+  const ran = session === 1 ? "1 worker session" : `${session} worker sessions`;
+  console.log(`${ran} in ${elapsed(start)}`);
+  process.exit(ok ? 0 : 1);
+}
+
+async function run(
+  role: string,
+  engine: Engine,
+  template: string,
+): Promise<number> {
+  const prompt = template
+    .replaceAll("{{plan}}", plan)
+    .replaceAll("{{progress}}", progress)
+    .replaceAll("{{brief}}", briefPath)
+    .replaceAll("{{report}}", reportPath)
+    .replaceAll("{{session}}", String(session))
+    .replaceAll("{{sessions}}", String(maxSessions));
+  console.log(`\n=== ${role} ${engine.spec}`);
+  const started = Date.now();
+  const exit = await runSession(engine, prompt, quiet);
+  console.log(`${role} exited ${exit} after ${elapsed(started)}`);
+  // Only what an agent commits lands, but stash so nothing is lost
+  if (await isDirty()) {
+    await $`git stash push -q -u -m ${`insomniac: ${role} left session ${session} uncommitted`}`;
+    console.log(`${role} left uncommitted changes, stashed`);
+  }
+  return exit;
+}
+
+while (true) {
+  await rm(briefPath, { force: true });
+  await rm(reportPath, { force: true });
+
+  const orchestratorExit = await run(
+    "orchestrator",
+    orchestrator,
+    orchestratorPrompt,
   );
+  if (orchestratorExit !== 0) finish(`orchestrator exited ${orchestratorExit}`);
 
-  const iterStart = Date.now();
-
-  const prompt = promptTemplate
-    .replaceAll("{{plan}}", path.resolve(planPath))
-    .replaceAll("{{progress}}", path.resolve(progressPath));
-
-  if (debug) {
-    const preview = prompt.length > 200 ? prompt.slice(0, 200) + "..." : prompt;
-    console.log(`[debug] prompt: ${preview}`);
-    console.log(
-      `[debug] spawning: ${engine}${model ? ` --model ${model}` : ""}`,
-    );
+  const briefFile = Bun.file(briefPath);
+  if (!(await briefFile.exists())) finish("orchestrator wrote no brief");
+  const brief = parseBrief(await briefFile.text());
+  if (brief.status !== "task") {
+    finish(`${brief.status}: ${brief.reason}`, brief.status === "done");
+  }
+  if (session >= maxSessions) {
+    finish(`session cap reached, next task: ${brief.id}`);
   }
 
-  const exitCode = await runEngine(engine, prompt, model, quiet);
+  session++;
+  console.log(`task ${session}/${maxSessions} ${brief.id}: ${brief.title}`);
+  const workerExit = await run("worker", worker, workerPrompt);
 
-  const iterElapsed = Math.round((Date.now() - iterStart) / 1000);
-
-  if (exitCode !== 0) {
-    console.error(`Engine exited ${exitCode} (${formatTime(iterElapsed)})`);
-    stuckCount++;
-    if (stuckCount >= 3) {
-      console.log(`No progress for ${stuckCount} iterations, stopping.`);
-      break;
-    }
-    continue;
-  }
-
-  // Check completion and stuck detection
-  const after = await readPlan(planPath);
-  const afterTasks = allTasks(after);
-  const done = afterTasks.filter((t) => t.passes).length;
-  console.log(
-    `${done}/${afterTasks.length} tasks passing (${formatTime(iterElapsed)})`,
+  const reportFile = Bun.file(reportPath);
+  const report = (await reportFile.exists())
+    ? await reportFile.text()
+    : `Worker exited ${workerExit} without writing a report.`;
+  await appendFile(
+    progress,
+    `## ${brief.id} (session ${session})\n\n${report.trim()}\n\n`,
   );
-
-  if (done === before) {
-    stuckCount++;
-    if (stuckCount >= 3) {
-      console.log(`No progress for ${stuckCount} iterations, stopping.`);
-      break;
-    }
-  } else {
-    stuckCount = 0;
-  }
-}
-
-const elapsed = Math.round((Date.now() - loopStart) / 1000);
-const finalPlan = await readPlan(planPath);
-const finalTasks = allTasks(finalPlan);
-const passed = finalTasks.filter((t) => t.passes).length;
-const failed = finalTasks.filter((t) => !t.passes);
-
-console.log(
-  `\n${passed}/${finalTasks.length} tasks passed in ${formatTime(elapsed)}`,
-);
-if (failed.length > 0) {
-  console.log(`Failed: ${failed.map((t) => t.id).join(", ")}`);
 }
