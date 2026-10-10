@@ -5,7 +5,7 @@ description: Write a plan file for an insomniac run from a PRD, a request, or a 
 
 # Insomniac
 
-A plan is a markdown file an orchestrator agent owns during a run. Each task becomes one fresh worker session with no memory, so the plan carries what a session cannot infer from the codebase: intent, quality bar, verification. The orchestrator ticks, splits and reorders tasks as the run teaches it, so write for a reader who will edit it, not a script.
+A plan is a markdown file an orchestrator agent owns during a run. Workers never see it. The orchestrator briefs each attempt from it, and each attempt is a fresh worker session with no memory, so the plan carries what nobody can infer from the codebase: intent, quality bar, verification. The orchestrator works the open tasks in plan order, marks them done or blocked, and splits and reorders them as the run teaches it, so write for a reader who will edit it, not a script.
 
 ## Steps
 
@@ -13,18 +13,19 @@ A plan is a markdown file an orchestrator agent owns during a run. Each task bec
 2. Write the preamble: goal, quality bar, verification commands, constraints, out of scope
 3. Break the work into phases in dependency order, and tasks within them. Phase 1 is a tracer bullet: the thinnest path through every layer, working end to end. Risky and unknown work goes before safe work
 4. Size every task against the test below. Split any that fail
-5. Save it beside the code it changes, `plan.md` at the repo root unless the user says otherwise, and show the task list. The run needs a clean tree, so commit the plan before `insomniac plan.md` starts
+5. Save it where the user keeps plans, `plan.md` at the repo root unless they say otherwise, and show the task list
+6. If `.insomniac/progress.md` holds reports from another plan, tell the user to move it aside. Every run in a directory shares it, so the orchestrator would read those reports as this plan's history
 
 ## Sizing test
 
 A task fits when all four hold:
 
-- One fresh session with no prior context can finish it and verify it
-- It is one commit a reviewer can read in a few minutes
+- One attempt can finish it and verify it
+- It is one change a reviewer can read in a few minutes
 - Every verification step is literally checkable: a file exports X, a command exits 0, a page shows Y. "Works correctly" is not a step
 - It depends only on tasks before it in the plan
 
-Too small is cheaper than too large. A large task fails twice, then the orchestrator spends a turn splitting it.
+Too small is cheaper than too large. A large task burns attempts until the orchestrator splits it.
 
 ## Format
 
@@ -43,7 +44,7 @@ Too small is cheaper than too large. A large task fails twice, then the orchestr
 
 ## Constraints
 
-<Libraries to use or avoid, files not to touch, decisions already made.>
+<Libraries to use or avoid, files not to touch, decisions already made. Version control rules, such as a commit per task or a branch to work on, since insomniac never touches git.>
 
 ## Out of scope
 
@@ -63,7 +64,7 @@ Too small is cheaper than too large. A large task fails twice, then the orchestr
   - <verification step>
 ```
 
-Ids are short kebab-case and unique across the plan, since they become commit messages and progress headings. The orchestrator marks a task it cannot finish as `- [ ] <id>: <title> (blocked: <reason>)`.
+Ids are short kebab-case and unique across the plan, since they head the briefs and progress entries.
 
 ## Other kinds of run
 

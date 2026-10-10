@@ -1,13 +1,13 @@
 #!/usr/bin/env bun
+import { appendFile, mkdir, rm } from "node:fs/promises";
 import path from "node:path";
-import { appendFile, rm } from "node:fs/promises";
 import { parseArgs } from "node:util";
-import { $ } from "bun";
+
+import { parseBrief, type Brief } from "@/brief";
 import { engineNames, parseEngine, runSession, type Engine } from "@/engines";
-import { parseBrief } from "@/brief";
+import pkg from "../package.json";
 import orchestratorPrompt from "../prompts/orchestrator.md" with { type: "text" };
 import workerPrompt from "../prompts/worker.md" with { type: "text" };
-import pkg from "../package.json";
 
 const usage = `insomniac: a runner that takes coding agents through a plan, one task per session
 
@@ -17,8 +17,8 @@ Usage:
 Options:
   -o, --orchestrator <engine[:model]>  Engine that picks tasks (default: claude)
   -w, --worker <engine[:model]>        Engine that does tasks (default: claude)
-  -n, --sessions <n>                   Cap on worker sessions (default: 10)
-  -q, --quiet                          Hide engine output
+  -n, --attempts <n>                   Cap on attempts in this run (default: 10)
+  -q, --quiet                          Hide engine output from the terminal
   -h, --help                           Show this help
   -V, --version                        Print version
 
@@ -27,19 +27,36 @@ Engines: ${engineNames.join(", ")}
 
 function fail(error: unknown, help?: string): never {
   console.error(`Error: ${error instanceof Error ? error.message : error}`);
-  if (help) console.error(`\n${help}`);
+  if (help) {
+    console.error(`\n${help}`);
+  }
   process.exit(1);
 }
 
-function elapsed(since: number): string {
-  const total = Math.round((Date.now() - since) / 1000);
-  const m = Math.floor(total / 60);
-  const s = total % 60;
-  return m > 0 ? `${m}m ${s}s` : `${s}s`;
-}
+type Role = "orchestrator" | "worker";
 
-async function isDirty(): Promise<boolean> {
-  return (await $`git status --porcelain`.text()) !== "";
+const RETRY_FIRST_GAP = 60_000;
+const RETRY_MAX_GAP = 30 * 60_000;
+const RETRY_BUDGET = 6 * 60 * 60_000;
+
+function duration(ms: number) {
+  const total = Math.round(ms / 1000);
+  const h = Math.floor(total / 3600);
+  const m = Math.floor((total % 3600) / 60);
+  const s = total % 60;
+
+  const parts = [];
+  if (h > 0) {
+    parts.push(`${h}h`);
+  }
+  if (m > 0) {
+    parts.push(`${m}m`);
+  }
+  if (s > 0 || total === 0) {
+    parts.push(`${s}s`);
+  }
+
+  return parts.join(" ");
 }
 
 function parseCliArgs() {
@@ -50,7 +67,7 @@ function parseCliArgs() {
       options: {
         orchestrator: { type: "string", short: "o", default: "claude" },
         worker: { type: "string", short: "w", default: "claude" },
-        sessions: { type: "string", short: "n", default: "10" },
+        attempts: { type: "string", short: "n", default: "10" },
         quiet: { type: "boolean", short: "q", default: false },
         help: { type: "boolean", short: "h" },
         version: { type: "boolean", short: "V" },
@@ -81,12 +98,21 @@ try {
   fail(e, usage);
 }
 
-const planArg = args.positionals[0];
-if (!planArg) fail("Plan path is required", usage);
+const [planArg, ...extra] = args.positionals;
+if (!planArg) {
+  fail("Plan path is required", usage);
+}
+if (extra.length > 0) {
+  fail(`Unexpected arguments: ${extra.join(" ")}`, usage);
+}
 const plan = path.resolve(planArg);
-if (!(await Bun.file(plan).exists())) fail(`Plan not found: ${plan}`);
-const maxSessions = parseInt(args.values.sessions, 10);
-if (!(maxSessions > 0)) fail("--sessions must be a positive number");
+if (!(await Bun.file(plan).exists())) {
+  fail(`Plan not found: ${plan}`);
+}
+if (!/^[1-9]\d*$/.test(args.values.attempts)) {
+  fail("--attempts must be a positive integer");
+}
+const cap = parseInt(args.values.attempts, 10);
 const quiet = args.values.quiet;
 
 for (const engine of [orchestrator, worker]) {
@@ -95,90 +121,107 @@ for (const engine of [orchestrator, worker]) {
   }
 }
 
-const repo = await $`git rev-parse --show-toplevel`.quiet().nothrow();
-if (repo.exitCode !== 0) {
-  fail("Not a git repo. insomniac commits each task, so run it inside one.");
-}
-if (await isDirty()) fail("Working tree is dirty. Commit or stash first.");
-
-const stateDir = path.join(repo.text().trim(), ".insomniac");
+const start = Date.now();
+const stateDir = path.resolve(".insomniac");
 const progress = path.join(stateDir, "progress.md");
-const briefPath = path.join(stateDir, "brief.md");
-const reportPath = path.join(stateDir, "report.md");
+// Swedish locale formats as YYYY-MM-DD HH:MM:SS in local time
+const runName = new Date()
+  .toLocaleString("sv-SE")
+  .replace(" ", "_")
+  .replaceAll(":", "-");
+const runDir = path.join(stateDir, "runs", runName);
+await mkdir(runDir, { recursive: true });
 await Bun.write(path.join(stateDir, ".gitignore"), "*\n");
 
 console.log(`insomniac ${pkg.version}`);
 console.log(`  plan:          ${plan}`);
 console.log(`  progress:      ${progress}`);
+console.log(`  run:           ${runDir}`);
 console.log(`  orchestrator:  ${orchestrator.spec}`);
 console.log(`  worker:        ${worker.spec}`);
-console.log(`  sessions:      ${maxSessions}`);
+console.log(`  attempts:      ${cap}`);
 
-const start = Date.now();
-let session = 0;
+let attempts = 0;
+const succeeded = new Set<Role>();
 
 function finish(outcome: string, ok = false): never {
   console.log(`\n${outcome}`);
-  const ran = session === 1 ? "1 worker session" : `${session} worker sessions`;
-  console.log(`${ran} in ${elapsed(start)}`);
+  const made = attempts === 1 ? "1 attempt" : `${attempts} attempts`;
+  console.log(`${made} in ${duration(Date.now() - start)}`);
   process.exit(ok ? 0 : 1);
 }
 
-async function run(
-  role: string,
-  engine: Engine,
-  template: string,
-): Promise<number> {
+async function run(role: Role, engine: Engine, template: string, slot: string) {
+  const brief = path.join(runDir, `${slot}-brief.md`);
+  const report = path.join(runDir, `${slot}-report.md`);
+  const output = role === "orchestrator" ? brief : report;
   const prompt = template
     .replaceAll("{{plan}}", plan)
     .replaceAll("{{progress}}", progress)
-    .replaceAll("{{brief}}", briefPath)
-    .replaceAll("{{report}}", reportPath)
-    .replaceAll("{{session}}", String(session))
-    .replaceAll("{{sessions}}", String(maxSessions));
-  console.log(`\n=== ${role} ${engine.spec}`);
-  const started = Date.now();
-  const exit = await runSession(engine, prompt, quiet);
-  console.log(`${role} exited ${exit} after ${elapsed(started)}`);
-  // Only what an agent commits lands, but stash so nothing is lost
-  if (await isDirty()) {
-    await $`git stash push -q -u -m ${`insomniac: ${role} left session ${session} uncommitted`}`;
-    console.log(`${role} left uncommitted changes, stashed`);
+    .replaceAll("{{brief}}", brief)
+    .replaceAll("{{report}}", report);
+  let failingSince: number | null = null;
+  for (let tryNumber = 1; ; tryNumber++) {
+    console.log(`\n=== ${role} ${engine.spec}`);
+    // A failed try may have written its output
+    await rm(output, { force: true });
+    const started = Date.now();
+    const log = path.join(runDir, `${slot}-${role}-${tryNumber}.log`);
+    const exit = await runSession(engine, prompt, log, quiet);
+    if (exit === 0) {
+      console.log(`${role} exited 0 after ${duration(Date.now() - started)}`);
+      succeeded.add(role);
+
+      return output;
+    }
+    // Before the role's first success, a failure is most likely a setup error
+    if (!succeeded.has(role)) {
+      finish(`${role} exited ${exit}`);
+    }
+    failingSince ??= Date.now();
+    const failing = Date.now() - failingSince;
+    if (failing >= RETRY_BUDGET) {
+      finish(`${role} still failing after ${duration(failing)}`);
+    }
+    const wait = Math.min(
+      RETRY_FIRST_GAP * 2 ** (tryNumber - 1),
+      RETRY_MAX_GAP,
+    );
+    console.log(`${role} exited ${exit}, retrying in ${duration(wait)}`);
+    await Bun.sleep(wait);
   }
-  return exit;
 }
 
 while (true) {
-  await rm(briefPath, { force: true });
-  await rm(reportPath, { force: true });
-
-  const orchestratorExit = await run(
-    "orchestrator",
-    orchestrator,
-    orchestratorPrompt,
+  // Padded so run files sort in attempt order
+  const slot = String(attempts + 1).padStart(3, "0");
+  const briefFile = Bun.file(
+    await run("orchestrator", orchestrator, orchestratorPrompt, slot),
   );
-  if (orchestratorExit !== 0) finish(`orchestrator exited ${orchestratorExit}`);
-
-  const briefFile = Bun.file(briefPath);
-  if (!(await briefFile.exists())) finish("orchestrator wrote no brief");
-  const brief = parseBrief(await briefFile.text());
+  if (!(await briefFile.exists())) {
+    finish("orchestrator wrote no brief");
+  }
+  let brief: Brief;
+  try {
+    brief = parseBrief(await briefFile.text());
+  } catch (e) {
+    finish(e instanceof Error ? e.message : String(e));
+  }
   if (brief.status !== "task") {
     finish(`${brief.status}: ${brief.reason}`, brief.status === "done");
   }
-  if (session >= maxSessions) {
-    finish(`session cap reached, next task: ${brief.id}`);
+  if (attempts >= cap) {
+    finish(`attempt cap reached, next task: ${brief.id}`);
   }
 
-  session++;
-  console.log(`task ${session}/${maxSessions} ${brief.id}: ${brief.title}`);
-  const workerExit = await run("worker", worker, workerPrompt);
-
-  const reportFile = Bun.file(reportPath);
+  attempts++;
+  console.log(`attempt ${attempts}/${cap} ${brief.id}: ${brief.title}`);
+  const reportFile = Bun.file(await run("worker", worker, workerPrompt, slot));
   const report = (await reportFile.exists())
     ? await reportFile.text()
-    : `Worker exited ${workerExit} without writing a report.`;
+    : "Worker wrote no report.";
   await appendFile(
     progress,
-    `## ${brief.id} (session ${session})\n\n${report.trim()}\n\n`,
+    `## ${brief.id} (${runName}/${slot})\n\n${report.trim()}\n\n`,
   );
 }

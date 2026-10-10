@@ -7,15 +7,17 @@ export function parseBrief(text: string): Brief {
   const fields = new Map<string, string>();
   for (const line of header.split("\n")) {
     const colon = line.indexOf(":");
-    if (colon > 0)
+    if (colon > 0) {
       fields.set(line.slice(0, colon), line.slice(colon + 1).trim());
+    }
   }
   const status = fields.get("status");
   if (status === "task") {
     const id = fields.get("id");
     const title = fields.get("title");
-    if (!id || !title)
+    if (!id || !title) {
       throw new Error("Brief with status task needs id and title");
+    }
     return { status, id, title };
   }
   if (status === "done" || status === "blocked") {
