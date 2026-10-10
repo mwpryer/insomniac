@@ -7,6 +7,7 @@
 <p align="center">A runner that takes coding agents through a plan, one task per session.</p>
 
 <p align="center">
+  <a href="https://www.npmjs.com/package/@mwpryer/insomniac"><img src="https://img.shields.io/npm/v/@mwpryer/insomniac" alt="npm version"></a>
   <a href="skills/insomniac/SKILL.md"><img src="https://img.shields.io/badge/agent-ready-brightgreen" alt="agent-ready"></a>
   <a href="https://github.com/mwpryer/insomniac/stargazers"><img src="https://img.shields.io/github/stars/mwpryer/insomniac" alt="GitHub stars"></a>
 </p>
@@ -22,11 +23,10 @@ Each role can be a different CLI and model: Claude Code, Codex, OpenCode or Anti
 
 ## Install
 
-Requires [Bun](https://bun.sh) and at least one engine CLI installed and authenticated.
+Requires Node and at least one engine CLI installed and authenticated.
 
 ```bash
-bun install
-bun link
+npm i -g @mwpryer/insomniac
 ```
 
 ## Write a plan

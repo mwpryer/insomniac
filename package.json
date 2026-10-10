@@ -1,5 +1,5 @@
 {
-  "name": "@mwp13/insomniac",
+  "name": "@mwpryer/insomniac",
   "version": "0.2.0",
   "description": "A runner that takes coding agents through a plan, one task per session",
   "license": "MIT",
@@ -9,16 +9,18 @@
     "url": "git+https://github.com/mwpryer/insomniac.git"
   },
   "bin": {
-    "insomniac": "src/index.ts"
+    "insomniac": "dist/insomniac.js"
   },
   "files": [
-    "src",
-    "tsconfig.json",
-    "prompts",
+    "dist",
     "skills"
   ],
   "type": "module",
+  "publishConfig": {
+    "access": "public"
+  },
   "scripts": {
+    "build": "bun build src/index.ts --target=node --outfile=dist/insomniac.js",
     "check": "bun run lint && bun run fmt:check && bun run typecheck",
     "fix": "oxlint --fix && oxfmt",
     "fmt": "oxfmt",
@@ -27,7 +29,7 @@
     "typecheck": "tsc --noEmit"
   },
   "devDependencies": {
-    "@types/bun": "^1.4.2",
+    "@types/node": "^26.6.5",
     "oxfmt": "^0.71.0",
     "oxlint": "^1.86.0",
     "typescript": "^7.0.2"

@@ -4,7 +4,7 @@
     "target": "ESNext",
     "module": "Preserve",
     "moduleDetection": "force",
-    "types": ["bun"],
+    "types": ["node"],
     "moduleResolution": "bundler",
     "verbatimModuleSyntax": true,
     "noEmit": true,

@@ -1,6 +1,8 @@
-#!/usr/bin/env bun
-import { appendFile, mkdir, rm } from "node:fs/promises";
+#!/usr/bin/env node
+import { existsSync } from "node:fs";
+import { appendFile, mkdir, readFile, rm, writeFile } from "node:fs/promises";
 import path from "node:path";
+import { setTimeout as sleep } from "node:timers/promises";
 import { parseArgs } from "node:util";
 
 import { parseBrief, type Brief } from "@/brief";
@@ -106,7 +108,7 @@ if (extra.length > 0) {
   fail(`Unexpected arguments: ${extra.join(" ")}`, usage);
 }
 const plan = path.resolve(planArg);
-if (!(await Bun.file(plan).exists())) {
+if (!existsSync(plan)) {
   fail(`Plan not found: ${plan}`);
 }
 if (!/^[1-9]\d*$/.test(args.values.attempts)) {
@@ -115,8 +117,9 @@ if (!/^[1-9]\d*$/.test(args.values.attempts)) {
 const cap = parseInt(args.values.attempts, 10);
 const quiet = args.values.quiet;
 
+const pathDirs = (process.env.PATH ?? "").split(path.delimiter);
 for (const engine of [orchestrator, worker]) {
-  if (!Bun.which(engine.name)) {
+  if (!pathDirs.some((dir) => existsSync(path.join(dir, engine.name)))) {
     fail(`Engine "${engine.name}" is not on PATH. Install its CLI first.`);
   }
 }
@@ -131,7 +134,7 @@ const runName = new Date()
   .replaceAll(":", "-");
 const runDir = path.join(stateDir, "runs", runName);
 await mkdir(runDir, { recursive: true });
-await Bun.write(path.join(stateDir, ".gitignore"), "*\n");
+await writeFile(path.join(stateDir, ".gitignore"), "*\n");
 
 console.log(`insomniac ${pkg.version}`);
 console.log(`  plan:          ${plan}`);
@@ -188,22 +191,25 @@ async function run(role: Role, engine: Engine, template: string, slot: string) {
       RETRY_MAX_GAP,
     );
     console.log(`${role} exited ${exit}, retrying in ${duration(wait)}`);
-    await Bun.sleep(wait);
+    await sleep(wait);
   }
 }
 
 while (true) {
   // Padded so run files sort in attempt order
   const slot = String(attempts + 1).padStart(3, "0");
-  const briefFile = Bun.file(
-    await run("orchestrator", orchestrator, orchestratorPrompt, slot),
+  const briefPath = await run(
+    "orchestrator",
+    orchestrator,
+    orchestratorPrompt,
+    slot,
   );
-  if (!(await briefFile.exists())) {
+  if (!existsSync(briefPath)) {
     finish("orchestrator wrote no brief");
   }
   let brief: Brief;
   try {
-    brief = parseBrief(await briefFile.text());
+    brief = parseBrief(await readFile(briefPath, "utf8"));
   } catch (e) {
     finish(e instanceof Error ? e.message : String(e));
   }
@@ -216,9 +222,9 @@ while (true) {
 
   attempts++;
   console.log(`attempt ${attempts}/${cap} ${brief.id}: ${brief.title}`);
-  const reportFile = Bun.file(await run("worker", worker, workerPrompt, slot));
-  const report = (await reportFile.exists())
-    ? await reportFile.text()
+  const reportPath = await run("worker", worker, workerPrompt, slot);
+  const report = existsSync(reportPath)
+    ? await readFile(reportPath, "utf8")
     : "Worker wrote no report.";
   await appendFile(
     progress,
