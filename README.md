@@ -44,7 +44,7 @@ The plan is a living document. Edit it mid-run to add tasks, reopen wrong ones o
 
 The plan also sets the rules for version control. insomniac never touches git, so if you want a clean tree to start from, a commit per task or a particular branch, say so in the plan. The orchestrator passes those rules to every worker. Without them, agents do whatever their own configuration says.
 
-Install the skill in your own projects with:
+The skill also checks the directory before a run and reviews the run in the morning. Install it in your own projects with:
 
 ```bash
 npx skills add mwpryer/insomniac
